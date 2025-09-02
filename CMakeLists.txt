@@ -25,6 +25,27 @@ message(STATUS "Build type (CMAKE_BUILD_TYPE): ${CMAKE_BUILD_TYPE}")
 
 project(SEAL VERSION 4.1.2 LANGUAGES CXX C)
 
+# Define RISCV as an option
+option(RISCVRVV "Enable RISC-V RVV extension support" OFF)
+
+# Check if RISCV system
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv")
+    message(STATUS "Detected RISC-V architecture. Adding custom flags...")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+    # If RISCV is enabled (RISCVRVV=ON)
+    if(RISCVRVV)
+        message(STATUS "RISC-V RVV flag detected. Adding rv64gcv flags.")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=rv64gcv -mabi=lp64d")
+    else()
+        # If not enabled
+        message(STATUS "RISC-V RVV flag not detected. Adding rv64gc flags.")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=rv64gc -mabi=lp64d")
+    endif()
+endif()
+
+# Print all flags
+message(STATUS "Final CMake CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+
 ########################
 # Global configuration #
 ########################
