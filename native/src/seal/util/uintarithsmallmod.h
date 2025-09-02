@@ -10,6 +10,9 @@
 #include "seal/util/uintarith.h"
 #include <cstdint>
 #include <type_traits>
+#ifdef __riscv_vector
+#include <riscv_vector.h>
+#endif
 
 namespace seal
 {
@@ -202,6 +205,65 @@ namespace seal
             // One more subtraction is enough
             return SEAL_COND_SELECT(tmp3 >= modulus.value(), tmp3 - modulus.value(), tmp3);
         }
+
+    #if defined(__riscv_v_intrinsic)
+        
+          inline void barrett_reduce_128_batch(const uint64_t* input_lo,const uint64_t* input_hi,size_t count,const Modulus& modulus,uint64_t* results)              
+          {
+                  const uint64_t* const_ratio = modulus.const_ratio().data();
+                  uint64_t modulus_val = modulus.value();
+                  
+                  // Process in vector batches
+                  size_t i = 0;
+                  while (i < count) {
+                      size_t vl = __riscv_vsetvl_e64m4(count - i);
+                      // Load inputs
+                      vuint64m4_t vinput_lo = __riscv_vle64_v_u64m4(&input_lo[i], vl);
+                      vuint64m4_t vinput_hi = __riscv_vle64_v_u64m4(&input_hi[i], vl);
+                      // Broadcast constants
+                      vuint64m4_t vconst_ratio_0 = __riscv_vmv_v_x_u64m4(const_ratio[0], vl);
+                      vuint64m4_t vconst_ratio_1 = __riscv_vmv_v_x_u64m4(const_ratio[1], vl);
+                      vuint64m4_t vmodulus_val = __riscv_vmv_v_x_u64m4(modulus_val, vl);
+                      // Utility vectors
+                      vuint64m4_t vzero = __riscv_vmv_v_x_u64m4(0, vl);
+                      vuint64m4_t vone = __riscv_vmv_v_x_u64m4(1, vl);
+                      // Round 1: multiply_uint64_hw64(input[0], const_ratio[0], &carry);
+                      vuint64m4_t carry = __riscv_vmulhu_vv_u64m4(vinput_lo, vconst_ratio_0, vl);
+                      // multiply_uint64(input[0], const_ratio[1], tmp2);
+                      vuint64m4_t tmp2_lo = __riscv_vmul_vv_u64m4(vinput_lo, vconst_ratio_1, vl);
+                      vuint64m4_t tmp2_hi = __riscv_vmulhu_vv_u64m4(vinput_lo, vconst_ratio_1, vl);
+                      // tmp3 = tmp2[1] + add_uint64(tmp2[0], carry, &tmp1);
+                      vuint64m4_t tmp1 = __riscv_vadd_vv_u64m4(tmp2_lo, carry, vl);
+                      vbool16_t carry_mask = __riscv_vmsltu_vv_u64m4_b16(tmp1, tmp2_lo, vl);
+                      vuint64m4_t carry_out = __riscv_vmerge_vvm_u64m4(vzero, vone, carry_mask, vl);
+                      vuint64m4_t tmp3 = __riscv_vadd_vv_u64m4(tmp2_hi, carry_out, vl);
+                      // Round 2: multiply_uint64(input[1], const_ratio[0], tmp2);
+                      tmp2_lo = __riscv_vmul_vv_u64m4(vinput_hi, vconst_ratio_0, vl);
+                      tmp2_hi = __riscv_vmulhu_vv_u64m4(vinput_hi, vconst_ratio_0, vl);
+                      // carry = tmp2[1] + add_uint64(tmp1, tmp2[0], &tmp1);
+                      vuint64m4_t old_tmp1 = tmp1;
+                      tmp1 = __riscv_vadd_vv_u64m4(tmp1, tmp2_lo, vl);
+                      carry_mask = __riscv_vmsltu_vv_u64m4_b16(tmp1, old_tmp1, vl);
+                      carry_out = __riscv_vmerge_vvm_u64m4(vzero, vone, carry_mask, vl);
+                      carry = __riscv_vadd_vv_u64m4(tmp2_hi, carry_out, vl);
+                      // tmp1 = input[1] * const_ratio[1] + tmp3 + carry;
+                      vuint64m4_t final_mult = __riscv_vmul_vv_u64m4(vinput_hi, vconst_ratio_1, vl);
+                      tmp1 = __riscv_vadd_vv_u64m4(final_mult, tmp3, vl);
+                      tmp1 = __riscv_vadd_vv_u64m4(tmp1, carry, vl);
+                      // Barrett subtraction: tmp3 = input[0] - tmp1 * modulus.value();
+                      vuint64m4_t reduction = __riscv_vmul_vv_u64m4(tmp1, vmodulus_val, vl);
+                      tmp3 = __riscv_vsub_vv_u64m4(vinput_lo, reduction, vl);
+                      // One more subtraction if needed: SEAL_COND_SELECT(tmp3 >= modulus.value(), tmp3 - modulus.value(), tmp3);
+                      vbool16_t need_reduction = __riscv_vmsgeu_vv_u64m4_b16(tmp3, vmodulus_val, vl);
+                      vuint64m4_t final_sub = __riscv_vsub_vv_u64m4(tmp3, vmodulus_val, vl);
+                      vuint64m4_t result = __riscv_vmerge_vvm_u64m4(tmp3, final_sub, need_reduction, vl);
+                      // Store results
+                      __riscv_vse64_v_u64m4(&results[i], result, vl);
+                      i += vl;
+                  }
+              }
+        
+        #endif
 
         /**
         Returns input mod modulus. This is not standard Barrett reduction.
@@ -449,7 +511,8 @@ namespace seal
         Computes <operand1, operand2> mod modulus.
         Correctness: Follows the condition of barrett_reduce_128.
         */
-        SEAL_NODISCARD std::uint64_t dot_product_mod(
-            const std::uint64_t *operand1, const std::uint64_t *operand2, std::size_t count, const Modulus &modulus);
+        SEAL_NODISCARD std::uint64_t dot_product_mod(const std::uint64_t *operand1, const std::uint64_t *operand2, std::size_t count, const Modulus &modulus);
+        void vector_dot_product_mod_batch(const uint64_t** temps,const uint64_t* base_row,size_t count,size_t ibase_size,const Modulus* mod,uint64_t* results_out) ;
+
     } // namespace util
 } // namespace seal
