@@ -8,6 +8,9 @@
 #include <numeric>
 #include <random>
 #include <tuple>
+#ifdef __riscv_vector
+#include <riscv_vector.h>
+#endif
 
 using namespace std;
 
@@ -106,6 +109,60 @@ namespace seal
                 return;
             }
         }
+        #if defined(__riscv_v_intrinsic)
+          
+            void vector_dot_product_mod_batch(const uint64_t** temps, const uint64_t* base_row,size_t count, size_t ibase_size, const Modulus* mod,uint64_t* results_out) {
+    
+              uint64_t* acc_lo = new uint64_t[count]();
+              uint64_t* acc_hi = new uint64_t[count]();
+              
+              size_t i = 0;
+              while (i < count) {
+                  size_t vl = __riscv_vsetvl_e64m4(count - i);
+                  
+                  // Vector accumulators
+                  vuint64m4_t vacc_lo = __riscv_vmv_v_x_u64m4(0, vl);
+                  vuint64m4_t vacc_hi = __riscv_vmv_v_x_u64m4(0, vl);
+                  
+                  for (size_t k = 0; k < ibase_size; k++) {
+                      vuint64m4_t vbase = __riscv_vmv_v_x_u64m4(base_row[k], vl);
+                      
+                      // Use dynamic allocation instead of VLA
+                      uint64_t* temp_vals = new uint64_t[vl];
+                      
+                      for (size_t j = 0; j < vl; j++) {
+                          temp_vals[j] = temps[i + j][k];
+                      }
+                      vuint64m4_t vtemp = __riscv_vle64_v_u64m4(temp_vals, vl);
+                      delete[] temp_vals;
+                      
+                      // Multiply
+                      vuint64m4_t vlo = __riscv_vmul_vv_u64m4(vtemp, vbase, vl);
+                      vuint64m4_t vhi = __riscv_vmulhu_vv_u64m4(vtemp, vbase, vl);
+                      
+                      // Add with carry detection
+                      vuint64m4_t old_lo = vacc_lo;
+                      vacc_lo = __riscv_vadd_vv_u64m4(vacc_lo, vlo, vl);
+                      
+                      // Correct carry detection and addition
+                      vbool16_t carry = __riscv_vmsltu_vv_u64m4_b16(vacc_lo, old_lo, vl);
+                      vacc_hi = __riscv_vadd_vv_u64m4(vacc_hi, vhi, vl);
+                      vacc_hi = __riscv_vadd_vx_u64m4_m(carry, vacc_hi, 1, vl);  // Fixed parameter order
+                  }
+                  
+                  // Store results
+                  __riscv_vse64_v_u64m4(&acc_lo[i], vacc_lo, vl);
+                  __riscv_vse64_v_u64m4(&acc_hi[i], vacc_hi, vl);
+                  
+                  i += vl;
+              }
+              
+              barrett_reduce_128_batch(acc_lo, acc_hi, count, *mod, results_out);
+              delete[] acc_lo;
+              delete[] acc_hi;
+          }
+         
+        #endif
 
         uint64_t dot_product_mod(
             const uint64_t *operand1, const uint64_t *operand2, size_t count, const Modulus &modulus)
