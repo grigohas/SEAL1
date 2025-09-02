@@ -453,14 +453,29 @@ namespace seal
                         });
                     }
                 });
-
+                
+            #if defined(__riscv_v_intrinsic)
+              for (size_t i = 0; i < obase_size; i++) {
+                  const uint64_t* base_row = base_change_matrix_[i].get();
+                  const Modulus& mod = obase_.base()[i];
+                  // Prepare array of temp pointers
+                  const uint64_t* temp_ptrs[count];
+                  for (size_t j = 0; j < count; j++) {
+                      temp_ptrs[j] = temp[j];
+                  }
+                  // BEST: Write directly to out[i] - no extra allocation needed
+                  vector_dot_product_mod_batch(temp_ptrs, base_row, count, ibase_size, &mod, out[i]);
+            }
+            #else
             SEAL_ITERATE(iter(out, base_change_matrix_, obase_.base()), obase_size, [&](auto I) {
-                SEAL_ITERATE(iter(get<0>(I), temp), count, [&](auto J) {
-                    // Compute the base conversion sum modulo obase element
-                    get<0>(J) = dot_product_mod(get<1>(J), get<1>(I).get(), ibase_size, get<2>(I));
+            SEAL_ITERATE(iter(get<0>(I), temp), count, [&](auto J) {
+                // Compute the base conversion sum modulo obase element
+                 get<0>(J) = dot_product_mod(get<1>(J), get<1>(I).get(), ibase_size, get<2>(I));
                 });
             });
+            #endif  
         }
+        
 
         // See "An Improved RNS Variant of the BFV Homomorphic Encryption Scheme" (CT-RSA 2019) for details
         void BaseConverter::exact_convert_array(ConstRNSIter in, CoeffIter out, MemoryPoolHandle pool) const
